@@ -5,87 +5,108 @@ from flask_cors import CORS
 from PIL import Image
 import easyocr
 import uuid
+import threading
+import time
 
 # Initialize Flask app
 app = Flask(__name__)
 
-# Configure CORS with your EXACT frontend URL
+# Configure CORS with your exact frontend URL
 CORS(app, 
-     origins=['https://adityaaojhaaa.github.io', 'https://adityaaojhaaa.github.io/ocrfrontend/', 'http://localhost:3000'],
+     origins=['https://adityaaojhaaa.github.io', 'https://adityaaojhaaa.github.io/ocrfrontend/', '*'],
      methods=['GET', 'POST', 'OPTIONS'],
-     allow_headers=['Content-Type', 'Authorization'],
-     supports_credentials=True)
+     allow_headers=['Content-Type', 'Authorization'])
 
-# Global reader variable
+# Global reader variable - initialize only once
 reader = None
+reader_lock = threading.Lock()
 
 UPLOAD_FOLDER = './uploads'
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
-app.config['MAX_CONTENT_LENGTH'] = 8 * 1024 * 1024
+app.config['MAX_CONTENT_LENGTH'] = 5 * 1024 * 1024  # Reduced to 5MB
 
-def get_reader():
+def initialize_reader():
+    """Initialize EasyOCR reader with memory optimization"""
     global reader
-    if reader is None:
-        reader = easyocr.Reader(['en'], gpu=False, verbose=False)
+    with reader_lock:
+        if reader is None:
+            try:
+                print("Initializing EasyOCR reader...")
+                # Use minimal configuration to reduce memory usage
+                reader = easyocr.Reader(['en'], 
+                                      gpu=False, 
+                                      verbose=False,
+                                      download_enabled=True,
+                                      detector=True,
+                                      recognizer=True)
+                print("EasyOCR reader initialized successfully")
+                gc.collect()  # Force garbage collection
+            except Exception as e:
+                print(f"Failed to initialize EasyOCR: {e}")
+                reader = None
     return reader
 
 def extract_text(image_path):
+    """Extract text with aggressive memory management"""
     try:
+        # Compress image aggressively
         with Image.open(image_path) as img:
-            max_size = (800, 800)
+            # Convert to RGB if needed
+            if img.mode != 'RGB':
+                img = img.convert('RGB')
+            
+            # Resize to reduce memory usage
+            max_size = (600, 600)  # Further reduced size
             if img.size[0] > max_size[0] or img.size[1] > max_size[1]:
                 img.thumbnail(max_size, Image.Resampling.LANCZOS)
-                img.save(image_path, optimize=True, quality=80)
+                img.save(image_path, optimize=True, quality=70)
         
-        ocr_reader = get_reader()
-        result = ocr_reader.readtext(image_path, detail=0, paragraph=True)
+        # Get reader
+        ocr_reader = initialize_reader()
+        if ocr_reader is None:
+            raise Exception("Failed to initialize OCR reader")
+        
+        # Process with minimal memory footprint
+        result = ocr_reader.readtext(image_path, detail=0, paragraph=False)
+        
+        # Immediate cleanup
         gc.collect()
         
-        return " ".join(result)
+        return " ".join(result) if result else "No text found"
+        
     except Exception as e:
         gc.collect()
         raise Exception(f"OCR processing failed: {str(e)}")
 
-def clean_text(text):
-    return "\n".join(line.strip() for line in text.splitlines() if line.strip())
-
 # Add CORS headers to all responses
 @app.after_request
 def after_request(response):
-    origin = request.headers.get('Origin')
-    if origin in ['https://adityaaojhaaa.github.io', 'https://adityaaojhaaa.github.io/ocrfrontend/']:
-        response.headers.add('Access-Control-Allow-Origin', origin)
+    response.headers.add('Access-Control-Allow-Origin', '*')
     response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
     response.headers.add('Access-Control-Allow-Methods', 'GET,POST,OPTIONS')
-    response.headers.add('Access-Control-Allow-Credentials', 'true')
     return response
+
+@app.before_request
+def handle_preflight():
+    if request.method == "OPTIONS":
+        response = jsonify({'status': 'OK'})
+        response.headers.add('Access-Control-Allow-Origin', '*')
+        response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
+        response.headers.add('Access-Control-Allow-Methods', 'GET,POST,OPTIONS')
+        return response
 
 @app.route('/', methods=['GET'])
 def home():
     return jsonify({
         "message": "TextExtract OCR API is running!",
         "status": "active",
-        "engine": "easyocr",
-        "cors": "enabled"
+        "engine": "easyocr-optimized"
     })
 
 @app.route('/health', methods=['GET'])
 def health_check():
     return jsonify({"status": "healthy"}), 200
-
-# Handle preflight OPTIONS requests for ALL routes
-@app.before_request
-def handle_preflight():
-    if request.method == "OPTIONS":
-        response = jsonify({'status': 'OK'})
-        origin = request.headers.get('Origin')
-        if origin in ['https://adityaaojhaaa.github.io', 'https://adityaaojhaaa.github.io/ocrfrontend/']:
-            response.headers.add('Access-Control-Allow-Origin', origin)
-        response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
-        response.headers.add('Access-Control-Allow-Methods', 'GET,POST,OPTIONS')
-        response.headers.add('Access-Control-Allow-Credentials', 'true')
-        return response
 
 @app.route('/upload', methods=['POST'])
 def upload_file():
@@ -100,27 +121,32 @@ def upload_file():
         if not file.filename.lower().endswith(('.png', '.jpg', '.jpeg', '.gif', '.bmp')):
             return jsonify({'error': 'Invalid file type. Please upload an image.'}), 400
         
+        # Generate unique filename
         unique_filename = str(uuid.uuid4()) + os.path.splitext(file.filename)[1]
         file_path = os.path.join(app.config['UPLOAD_FOLDER'], unique_filename)
         
+        # Save file
         file.save(file_path)
         
         try:
+            # Extract text
             raw_text = extract_text(file_path)
-            cleaned_text = clean_text(raw_text)
             
+            # Clean up file immediately
             if os.path.exists(file_path):
                 os.remove(file_path)
             
+            # Force garbage collection
             gc.collect()
             
             return jsonify({
                 'success': True,
-                'text': cleaned_text,
+                'text': raw_text,
                 'message': 'Text extracted successfully'
             })
             
         except Exception as ocr_error:
+            # Clean up on error
             if os.path.exists(file_path):
                 os.remove(file_path)
             gc.collect()
@@ -129,18 +155,6 @@ def upload_file():
     except Exception as e:
         gc.collect()
         return jsonify({'error': f'Server error: {str(e)}'}), 500
-
-@app.errorhandler(413)
-def request_entity_too_large(error):
-    return jsonify({'error': 'File too large. Maximum size is 8MB.'}), 413
-
-@app.errorhandler(404)
-def not_found(error):
-    return jsonify({'error': 'Endpoint not found'}), 404
-
-@app.errorhandler(500)
-def internal_error(error):
-    return jsonify({'error': 'Internal server error'}), 500
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
