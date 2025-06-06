@@ -8,7 +8,13 @@ import uuid
 
 # Initialize Flask app
 app = Flask(__name__)
-CORS(app)
+
+# Configure CORS properly for your GitHub Pages domain
+CORS(app, 
+     origins=['https://adityaaojhaaa.github.io', 'http://localhost:3000', 'http://127.0.0.1:3000'],
+     methods=['GET', 'POST', 'OPTIONS'],
+     allow_headers=['Content-Type', 'Authorization'],
+     supports_credentials=True)
 
 # Global reader variable - will be initialized lazily
 reader = None
@@ -23,53 +29,65 @@ def get_reader():
     """Lazy initialization of EasyOCR reader to save memory"""
     global reader
     if reader is None:
-        # Initialize with minimal memory footprint
         reader = easyocr.Reader(['en'], gpu=False, verbose=False)
     return reader
 
 def extract_text(image_path):
     """Extract text from image using EasyOCR with memory optimization"""
     try:
-        # Compress image before processing to reduce memory usage
         with Image.open(image_path) as img:
-            # Resize large images to reduce memory consumption
-            max_size = (800, 800)  # Reduced size for memory optimization
+            max_size = (800, 800)
             if img.size[0] > max_size[0] or img.size[1] > max_size[1]:
                 img.thumbnail(max_size, Image.Resampling.LANCZOS)
                 img.save(image_path, optimize=True, quality=80)
         
-        # Get reader and process
         ocr_reader = get_reader()
         result = ocr_reader.readtext(image_path, detail=0, paragraph=True)
-        
-        # Force garbage collection after processing
         gc.collect()
         
         return " ".join(result)
     except Exception as e:
-        gc.collect()  # Clean up memory even on error
+        gc.collect()
         raise Exception(f"OCR processing failed: {str(e)}")
 
 def clean_text(text):
     """Clean the extracted text for readability"""
     return "\n".join(line.strip() for line in text.splitlines() if line.strip())
 
+# Add CORS headers to all responses
+@app.after_request
+def after_request(response):
+    response.headers.add('Access-Control-Allow-Origin', 'https://adityaaojhaaa.github.io')
+    response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
+    response.headers.add('Access-Control-Allow-Methods', 'GET,POST,OPTIONS')
+    response.headers.add('Access-Control-Allow-Credentials', 'true')
+    return response
+
 @app.route('/', methods=['GET'])
 def home():
     return jsonify({
         "message": "TextExtract OCR API is running!",
         "status": "active",
-        "engine": "easyocr"
+        "engine": "easyocr",
+        "cors": "enabled"
     })
 
 @app.route('/health', methods=['GET'])
 def health_check():
     return jsonify({"status": "healthy"}), 200
 
+# Handle preflight OPTIONS requests
+@app.route('/upload', methods=['OPTIONS'])
+def handle_options():
+    response = jsonify({'status': 'OK'})
+    response.headers.add('Access-Control-Allow-Origin', 'https://adityaaojhaaa.github.io')
+    response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
+    response.headers.add('Access-Control-Allow-Methods', 'GET,POST,OPTIONS')
+    return response
+
 @app.route('/upload', methods=['POST'])
 def upload_file():
     try:
-        # Check if file is in request
         if 'file' not in request.files:
             return jsonify({'error': 'No file uploaded'}), 400
         
@@ -77,27 +95,21 @@ def upload_file():
         if file.filename == '':
             return jsonify({'error': 'No file selected'}), 400
         
-        # Check if file is an image
         if not file.filename.lower().endswith(('.png', '.jpg', '.jpeg', '.gif', '.bmp')):
             return jsonify({'error': 'Invalid file type. Please upload an image.'}), 400
         
-        # Generate unique filename
         unique_filename = str(uuid.uuid4()) + os.path.splitext(file.filename)[1]
         file_path = os.path.join(app.config['UPLOAD_FOLDER'], unique_filename)
         
-        # Save file
         file.save(file_path)
         
         try:
-            # Perform OCR
             raw_text = extract_text(file_path)
             cleaned_text = clean_text(raw_text)
             
-            # Clean up uploaded file immediately
             if os.path.exists(file_path):
                 os.remove(file_path)
             
-            # Force garbage collection
             gc.collect()
             
             return jsonify({
@@ -107,7 +119,6 @@ def upload_file():
             })
             
         except Exception as ocr_error:
-            # Clean up uploaded file in case of error
             if os.path.exists(file_path):
                 os.remove(file_path)
             gc.collect()
