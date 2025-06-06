@@ -5,85 +5,75 @@ from flask_cors import CORS
 from PIL import Image
 import easyocr
 import uuid
-import threading
-import time
 
 # Initialize Flask app
 app = Flask(__name__)
 
-# Configure CORS with your exact frontend URL
-CORS(app, 
-     origins=['https://adityaaojhaaa.github.io', 'https://adityaaojhaaa.github.io/ocrfrontend/', '*'],
-     methods=['GET', 'POST', 'OPTIONS'],
-     allow_headers=['Content-Type', 'Authorization'])
+# Configure CORS
+CORS(app, origins=['*'], methods=['GET', 'POST', 'OPTIONS'])
 
-# Global reader variable - initialize only once
+# Global reader variable - lazy initialization
 reader = None
-reader_lock = threading.Lock()
 
 UPLOAD_FOLDER = './uploads'
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
-app.config['MAX_CONTENT_LENGTH'] = 5 * 1024 * 1024  # Reduced to 5MB
+app.config['MAX_CONTENT_LENGTH'] = 3 * 1024 * 1024  # Reduced to 3MB
 
-def initialize_reader():
-    """Initialize EasyOCR reader with memory optimization"""
+def get_reader():
+    """Ultra-lightweight EasyOCR initialization"""
     global reader
-    with reader_lock:
-        if reader is None:
-            try:
-                print("Initializing EasyOCR reader...")
-                # Use minimal configuration to reduce memory usage
-                reader = easyocr.Reader(['en'], 
-                                      gpu=False, 
-                                      verbose=False,
-                                      download_enabled=True,
-                                      detector=True,
-                                      recognizer=True)
-                print("EasyOCR reader initialized successfully")
-                gc.collect()  # Force garbage collection
-            except Exception as e:
-                print(f"Failed to initialize EasyOCR: {e}")
-                reader = None
+    if reader is None:
+        try:
+            # Minimal EasyOCR configuration for memory efficiency
+            reader = easyocr.Reader(['en'], 
+                                  gpu=False, 
+                                  verbose=False,
+                                  quantize=True,  # Reduces model size
+                                  width_ths=0.9,  # More aggressive text detection
+                                  height_ths=0.9)
+            gc.collect()
+        except Exception as e:
+            print(f"EasyOCR init failed: {e}")
+            return None
     return reader
 
 def extract_text(image_path):
-    """Extract text with aggressive memory management"""
+    """Memory-optimized text extraction"""
     try:
-        # Compress image aggressively
+        # Aggressive image compression
         with Image.open(image_path) as img:
-            # Convert to RGB if needed
             if img.mode != 'RGB':
                 img = img.convert('RGB')
             
-            # Resize to reduce memory usage
-            max_size = (600, 600)  # Further reduced size
+            # Very small size to reduce memory
+            max_size = (400, 400)  # Much smaller
             if img.size[0] > max_size[0] or img.size[1] > max_size[1]:
                 img.thumbnail(max_size, Image.Resampling.LANCZOS)
-                img.save(image_path, optimize=True, quality=70)
+                img.save(image_path, optimize=True, quality=60)  # Lower quality
         
-        # Get reader
-        ocr_reader = initialize_reader()
+        ocr_reader = get_reader()
         if ocr_reader is None:
-            raise Exception("Failed to initialize OCR reader")
+            return "OCR initialization failed"
         
-        # Process with minimal memory footprint
-        result = ocr_reader.readtext(image_path, detail=0, paragraph=False)
+        # Process with minimal settings
+        result = ocr_reader.readtext(image_path, 
+                                   detail=0, 
+                                   paragraph=False,
+                                   width_ths=0.9,
+                                   height_ths=0.9)
         
-        # Immediate cleanup
-        gc.collect()
-        
-        return " ".join(result) if result else "No text found"
+        gc.collect()  # Immediate cleanup
+        return " ".join(result) if result else "No text detected"
         
     except Exception as e:
         gc.collect()
-        raise Exception(f"OCR processing failed: {str(e)}")
+        return f"Processing failed: {str(e)}"
 
-# Add CORS headers to all responses
 @app.after_request
 def after_request(response):
     response.headers.add('Access-Control-Allow-Origin', '*')
-    response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
+    response.headers.add('Access-Control-Allow-Headers', 'Content-Type')
     response.headers.add('Access-Control-Allow-Methods', 'GET,POST,OPTIONS')
     return response
 
@@ -92,21 +82,17 @@ def handle_preflight():
     if request.method == "OPTIONS":
         response = jsonify({'status': 'OK'})
         response.headers.add('Access-Control-Allow-Origin', '*')
-        response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
+        response.headers.add('Access-Control-Allow-Headers', 'Content-Type')
         response.headers.add('Access-Control-Allow-Methods', 'GET,POST,OPTIONS')
         return response
 
 @app.route('/', methods=['GET'])
 def home():
     return jsonify({
-        "message": "TextExtract OCR API is running!",
+        "message": "OCR API Running",
         "status": "active",
-        "engine": "easyocr-optimized"
+        "memory": "optimized"
     })
-
-@app.route('/health', methods=['GET'])
-def health_check():
-    return jsonify({"status": "healthy"}), 200
 
 @app.route('/upload', methods=['POST'])
 def upload_file():
@@ -115,42 +101,37 @@ def upload_file():
             return jsonify({'error': 'No file uploaded'}), 400
         
         file = request.files['file']
-        if file.filename == '':
+        if not file or file.filename == '':
             return jsonify({'error': 'No file selected'}), 400
         
-        if not file.filename.lower().endswith(('.png', '.jpg', '.jpeg', '.gif', '.bmp')):
-            return jsonify({'error': 'Invalid file type. Please upload an image.'}), 400
-        
-        # Generate unique filename
-        unique_filename = str(uuid.uuid4()) + os.path.splitext(file.filename)[1]
-        file_path = os.path.join(app.config['UPLOAD_FOLDER'], unique_filename)
+        if not file.filename.lower().endswith(('.png', '.jpg', '.jpeg')):
+            return jsonify({'error': 'Only PNG, JPG, JPEG allowed'}), 400
         
         # Save file
+        unique_filename = str(uuid.uuid4()) + '.jpg'  # Always save as JPG
+        file_path = os.path.join(app.config['UPLOAD_FOLDER'], unique_filename)
         file.save(file_path)
         
         try:
             # Extract text
-            raw_text = extract_text(file_path)
+            text = extract_text(file_path)
             
-            # Clean up file immediately
+            # Immediate cleanup
             if os.path.exists(file_path):
                 os.remove(file_path)
-            
-            # Force garbage collection
             gc.collect()
             
             return jsonify({
                 'success': True,
-                'text': raw_text,
-                'message': 'Text extracted successfully'
+                'text': text,
+                'message': 'Processed successfully'
             })
             
-        except Exception as ocr_error:
-            # Clean up on error
+        except Exception as e:
             if os.path.exists(file_path):
                 os.remove(file_path)
             gc.collect()
-            return jsonify({'error': str(ocr_error)}), 500
+            return jsonify({'error': f'Processing error: {str(e)}'}), 500
             
     except Exception as e:
         gc.collect()
