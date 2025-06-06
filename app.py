@@ -9,31 +9,28 @@ import uuid
 # Initialize Flask app
 app = Flask(__name__)
 
-# Configure CORS properly for your GitHub Pages domain
+# Configure CORS with your EXACT frontend URL
 CORS(app, 
-     origins=['https://adityaaojhaaa.github.io', 'http://localhost:3000', 'http://127.0.0.1:3000'],
+     origins=['https://adityaaojhaaa.github.io', 'https://adityaaojhaaa.github.io/ocrfrontend/', 'http://localhost:3000'],
      methods=['GET', 'POST', 'OPTIONS'],
      allow_headers=['Content-Type', 'Authorization'],
      supports_credentials=True)
 
-# Global reader variable - will be initialized lazily
+# Global reader variable
 reader = None
 
-# Set upload folder
 UPLOAD_FOLDER = './uploads'
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
-app.config['MAX_CONTENT_LENGTH'] = 8 * 1024 * 1024  # 8MB limit
+app.config['MAX_CONTENT_LENGTH'] = 8 * 1024 * 1024
 
 def get_reader():
-    """Lazy initialization of EasyOCR reader to save memory"""
     global reader
     if reader is None:
         reader = easyocr.Reader(['en'], gpu=False, verbose=False)
     return reader
 
 def extract_text(image_path):
-    """Extract text from image using EasyOCR with memory optimization"""
     try:
         with Image.open(image_path) as img:
             max_size = (800, 800)
@@ -51,13 +48,14 @@ def extract_text(image_path):
         raise Exception(f"OCR processing failed: {str(e)}")
 
 def clean_text(text):
-    """Clean the extracted text for readability"""
     return "\n".join(line.strip() for line in text.splitlines() if line.strip())
 
 # Add CORS headers to all responses
 @app.after_request
 def after_request(response):
-    response.headers.add('Access-Control-Allow-Origin', 'https://adityaaojhaaa.github.io')
+    origin = request.headers.get('Origin')
+    if origin in ['https://adityaaojhaaa.github.io', 'https://adityaaojhaaa.github.io/ocrfrontend/']:
+        response.headers.add('Access-Control-Allow-Origin', origin)
     response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
     response.headers.add('Access-Control-Allow-Methods', 'GET,POST,OPTIONS')
     response.headers.add('Access-Control-Allow-Credentials', 'true')
@@ -76,14 +74,18 @@ def home():
 def health_check():
     return jsonify({"status": "healthy"}), 200
 
-# Handle preflight OPTIONS requests
-@app.route('/upload', methods=['OPTIONS'])
-def handle_options():
-    response = jsonify({'status': 'OK'})
-    response.headers.add('Access-Control-Allow-Origin', 'https://adityaaojhaaa.github.io')
-    response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
-    response.headers.add('Access-Control-Allow-Methods', 'GET,POST,OPTIONS')
-    return response
+# Handle preflight OPTIONS requests for ALL routes
+@app.before_request
+def handle_preflight():
+    if request.method == "OPTIONS":
+        response = jsonify({'status': 'OK'})
+        origin = request.headers.get('Origin')
+        if origin in ['https://adityaaojhaaa.github.io', 'https://adityaaojhaaa.github.io/ocrfrontend/']:
+            response.headers.add('Access-Control-Allow-Origin', origin)
+        response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
+        response.headers.add('Access-Control-Allow-Methods', 'GET,POST,OPTIONS')
+        response.headers.add('Access-Control-Allow-Credentials', 'true')
+        return response
 
 @app.route('/upload', methods=['POST'])
 def upload_file():
